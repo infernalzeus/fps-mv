@@ -14,19 +14,21 @@ import numpy as np
 import cv2
 from dataclasses import dataclass
 from pathlib import Path
-from tqdm import tqdm
+
+from src.utils.cache import make_key, cache_get, cache_put
 
 
 @dataclass
 class HighlightSegment:
-    start: float   # seconds
-    end: float     # seconds
-    score: float   # 0–1 combined highlight score
+    start: float            # seconds
+    end: float              # seconds
+    score: float            # 0–1 combined highlight score
+    kill_time: float | None = None  # first kill event within this segment (seconds, absolute)
 
 
 def _extract_audio_energy(video_path: Path, sr: int = 22050) -> tuple[np.ndarray, float]:
     """Return per-second RMS energy array extracted from the video's audio track."""
-    import subprocess, tempfile, soundfile as sf, librosa
+    import subprocess, tempfile, librosa
 
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         tmp_path = tmp.name
@@ -102,6 +104,7 @@ def score_clip(
     window_sec: float = 3.0,
     threshold: float = 0.55,
     min_gap_sec: float = 2.0,
+    kill_event_times: list[float] | None = None,
 ) -> list[HighlightSegment]:
     """
     Analyze a gameplay clip and return a list of highlight segments.
@@ -112,7 +115,22 @@ def score_clip(
     window_sec : length of each highlight segment in seconds
     threshold  : minimum combined score (0–1) to qualify as a highlight
     min_gap_sec: merge segments closer than this
+    kill_event_times: optional per-second kill event timestamps; each one boosts score by 0.3
     """
+    params = dict(
+        audio_weight=audio_weight, motion_weight=motion_weight,
+        window_sec=window_sec, threshold=threshold, min_gap_sec=min_gap_sec,
+    )
+    cache_key = make_key(video_path, params)
+    cached = cache_get(cache_key)
+    if cached is not None:
+        print(f"  Scoring (cache hit): {video_path.name}")
+        return [
+            HighlightSegment(start=s["start"], end=s["end"], score=s["score"],
+                             kill_time=s.get("kill_time"))
+            for s in cached
+        ]
+
     print(f"  Scoring: {video_path.name}")
 
     try:
@@ -126,13 +144,19 @@ def score_clip(
     n_sec = len(motion)
 
     if has_audio and len(audio_energy) > 0:
-        # Align lengths
         min_len = min(n_sec, len(audio_energy))
         motion_norm = _normalize(motion[:min_len])
         audio_norm = _normalize(audio_energy[:min_len])
         combined = audio_weight * audio_norm + motion_weight * motion_norm
     else:
         combined = _normalize(motion)
+
+    # Boost seconds where kill events were detected
+    if kill_event_times:
+        for t in kill_event_times:
+            idx = int(t)
+            if 0 <= idx < len(combined):
+                combined[idx] = min(1.0, combined[idx] + 0.3)
 
     # Sliding window scoring
     win = max(1, int(window_sec))
@@ -148,5 +172,17 @@ def score_clip(
                 segments.append(HighlightSegment(start=start, end=end, score=score))
                 last_end = end
 
+    # Annotate segments with the first kill event that falls within them
+    if kill_event_times:
+        for seg in segments:
+            for kt in kill_event_times:
+                if seg.start <= kt <= seg.end:
+                    seg.kill_time = kt
+                    break
+
     segments.sort(key=lambda s: s.score, reverse=True)
+    cache_put(cache_key, [
+        {"start": s.start, "end": s.end, "score": s.score, "kill_time": s.kill_time}
+        for s in segments
+    ])
     return segments

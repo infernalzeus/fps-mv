@@ -45,9 +45,7 @@ def analyze_music(music_path: str | Path, peak_percentile: float = 75.0) -> Musi
     hop = 512
     rms = librosa.feature.rms(y=y, hop_length=hop)[0]
     beat_rms = np.array([
-        rms[librosa.time_to_frames(t, sr=sr, hop_length=hop)
-            if librosa.time_to_frames(t, sr=sr, hop_length=hop) < len(rms)
-            else -1]
+        rms[min(librosa.time_to_frames(t, sr=sr, hop_length=hop), len(rms) - 1)]
         for t in beat_times
     ], dtype=np.float32)
 
@@ -60,12 +58,13 @@ def analyze_music(music_path: str | Path, peak_percentile: float = 75.0) -> Musi
     peak_times = beat_times[peak_mask]
     peak_intensities = beat_rms_norm[peak_mask]
 
-    print(f"  Tempo: {float(tempo):.1f} BPM | Beats: {len(beat_times)} | Peaks: {len(peak_times)}")
+    tempo_val = float(np.atleast_1d(tempo)[0])
+    print(f"  Tempo: {tempo_val:.1f} BPM | Beats: {len(beat_times)} | Peaks: {len(peak_times)}")
 
     return MusicAnalysis(
         path=path,
         duration=duration,
-        tempo=float(tempo),
+        tempo=tempo_val,
         beat_times=beat_times,
         peak_times=peak_times,
         peak_intensities=peak_intensities,
