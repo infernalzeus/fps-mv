@@ -13,3 +13,5 @@ examples/*.mp3
 *.egg-info/
 dist/
 build/
+
+.pytest_cache/
